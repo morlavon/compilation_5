@@ -1,0 +1,154 @@
+%{
+#include <iostream>
+#include "hw3_output.hpp"
+#include "utilities.hpp"
+#include "ir_translation.hpp"
+using namespace output;
+extern int yylex();
+void yyerror(const char* s);
+extern int yylineno;
+%}
+%token CONST
+%token VOID
+%token INT
+%token BYTE
+%token B
+%token BOOL
+%token TRUE
+%token FALSE
+%token RETURN
+%token WHILE
+%token BREAK
+%token CONTINUE
+%token SC
+%token COMMA
+%token COMMENT
+%token ID
+%token NUM
+%token STRING
+
+%left LBRACE
+%left RBRACE
+%nonassoc IF
+%nonassoc ELSE
+%right ASSIGN
+%left OR
+%left AND
+%left WEAK_RELOP
+%nonassoc STRONG_RELOP
+%left WEAK_BINOP
+%left STRONG_BINOP
+%right NOT
+%left RPAREN
+%left LPAREN
+%%
+
+Program: Funcs
+       ;
+
+Funcs:  %empty {}
+      | FuncDecl Funcs{}
+      ;
+
+FuncDecl: RetType ID LPAREN Formals RPAREN LBRACE {initFunction($2.name,$1.type,$4.params,true); declFunc($1,$2,$4)} Statements { void endFunc($1,$8) } RBRACE{closeScope(true);}
+        ;
+
+RetType: Type{$$.type = $1.type;}
+        | VOID{$$.type = "VOID";}
+        ;
+
+Formals: %empty {$$.params = {};}
+        | FormalsList{$$.params=$1.params;}
+        ;
+
+FormalsList: FormalDecl{$$.params = {{$1.name,$1.type,$1.isConst}};}
+           | FormalDecl COMMA FormalsList{$$.params = {{$1.name,$1.type,$1.isConst}};
+                                          $$.params.insert($$.params.end(),$3.params.begin(),$3.params.end());}
+           ;
+
+FormalDecl: TypeAnnotation Type ID{$$.isConst = $1.isConst; $$.type = $2.type; $$.name = $3.name;};
+
+Statements: Statement{ nextListUpdate($$,$1); }
+          | Statements M Statement{bpatchNextList($1, $2); nextListUpdate($$, $3);}
+          ;
+
+Statement: LBRACE{initScope(false);}  Statements RBRACE{closeScope(false);  nextListUpdate($$,$3);}
+         | TypeAnnotation Type ID SC{checkNotConst($1.isConst); initVariable($3.name,$2.type,$1.isConst); assignNewReg($3,false); markerN($$);}
+         | TypeAnnotation Type ID ASSIGN Exp SC{checkAssignTypes($2.type,$5.type); initVariable($3.name,$2.type,$1.isConst); assignNewReg($3,true); storeValInReg($3,$5,$1.isConst); markerN($$);}
+         | ID ASSIGN Exp SC{checkAssignName($1.name,$3.type); storeValInReg($1,$3,false); markerN($$);}
+         | Call SC {markerN($$); returnEmptyFunc();}
+         | RETURN SC{checkReturnType("VOID", false);}
+         | RETURN Exp SC{checkReturnType($2.type,true); returnFunc($2);}
+         | IF N LPAREN M OpenIF RPAREN M Statement CloseIF %prec IF {nextListUpdate($$,$8); bpatchSingleCond($$, $2, $4, $5, $7);}
+         | IF N LPAREN M OpenIF RPAREN M Statement CloseIF ELSE {initScope(false);} M Statement {closeScope(false); bpatchDoubleCond($$, $2, $4, $5, $7, $8, $12, $13);}
+         | WHILE N {initScope(true);} LPAREN M {initWhile($5.label);} Exp {checkBool($7.type);} RPAREN M Statement {bpatchSingleCond($$, $2, $5, $7, $10); bpatchWhile($$, $5, $11);  closeScope(false);}
+         | BREAK {checkBreak(); getNextBreak();} SC {}
+         | CONTINUE {checkContinue(); getNextContinue();} SC {}
+         ;
+
+OpenIF : Exp {initScope(false); checkBool($1.type);}
+    ;
+
+CloseIF : %empty {closeScope(false);}
+    ;
+
+M : %empty {markerM($$);}
+;
+
+N : %empty {markerN($$);}
+;
+
+Call: ID LPAREN ExpList RPAREN{$$.type = checkFuncType($1.name,$3.params); callFunc(10,$$,$1,$3)}
+    | ID LPAREN RPAREN{$$.type = checkFuncType($1.name);}
+    ;
+
+ExpList: Exp{$$.params= {{$1.name,$1.type,$1.isConst}}; getBoolResult($1); $$.reg_add_list = {$1.reg_add};}
+       |  Exp COMMA ExpList{$$.params = {{$1.name,$1.type,$1.isConst}};
+                            $$.params.insert($$.params.end(), $3.params.begin(), $3.params.end());
+                            getBoolResult($3);
+                            $$.reg_add_list = {};
+                            $$.reg_add_list.insert($$.reg_add_list.end(), $1.reg_add_list.begin(), $1.reg_add_list.end());
+                            $$.reg_add_list.push_back($3.reg_add);
+                            }
+       ;
+
+
+Type: INT{$$.type = "INT";}
+    | BYTE{$$.type = "BYTE";}
+    | BOOL{$$.type = "BOOL";}
+    ;
+
+TypeAnnotation: %empty {$$.isConst = false;}
+              | CONST{$$.type = "CONST"; $$.isConst = true;}
+              ;
+
+Exp: LPAREN Exp RPAREN{$$.type = $2.type; $$.reg_add = $2.reg_add; $$.true_list = $2.true_list; $$.false_list = $2.false_list;};
+   | Exp WEAK_BINOP Exp{checkNumeric($1.type); checkNumeric($3.type); $$.type = getNumericType($1.type, $3.type); make_add_sub($$, $1, $2, $3);}
+   | Exp STRONG_BINOP Exp{checkNumeric($1.type); checkNumeric($3.type); $$.type = getNumericType($1.type, $3.type);  make_mul_div($$, $1, $2, $3);}
+   | ID{$$.type = validID($1.name); loadID($$, $1);}
+   | Call{$$.type = $1.type; $$.reg_add = $1.reg_add; funcAsBoolExp($$, $1); }
+   | NUM{$$.type = "INT"; $$.is_raw_num = true; getNumber($$,$1);}
+   | NUM B{checkValidByte($1.value); $$.type = "BYTE"; $$.is_raw_num = true;getNumber($$,$1);}
+   | STRING{$$.type = "STRING"; getString($$,$1);}
+   | TRUE{$$.type = "BOOL"; assignBool($$,true);}
+   | FALSE{$$.type = "BOOL"; assignBool($$,false);}
+   | NOT Exp{checkBool($2.type); $$.type = "BOOL"; invBool($$,S1);}
+   | Exp AND M Exp{checkBool($1.type); checkBool($4.type); $$.type = "BOOL"; andBool($$, $1, $3, $4);}
+   | Exp OR M Exp{checkBool($1.type); checkBool($4.type); $$.type = "BOOL"; orBool($$, $1, $3, $4); }
+   | Exp STRONG_RELOP Exp{checkNumeric($1.type); checkNumeric($3.type); $$.type = "BOOL"; expCompare($$, $1, $3, $2.name);  }
+   | Exp WEAK_RELOP Exp{checkNumeric($1.type); checkNumeric($3.type); $$.type = "BOOL"; expCompare($$, $1, $3, $2.name)}
+   | LPAREN Type RPAREN Exp{checkValidCast($2.type,$4.type); $$.type = $2.type;} //TODO Check About Cast?
+   ;
+
+%%
+
+int main(){
+    initGlobalScope();
+	yyparse();
+	endGlobalScope();
+}
+
+void yyerror(const char * s){
+	output::errorSyn(yylineno);
+	exit(1);
+}

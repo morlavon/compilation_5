@@ -1,0 +1,139 @@
+%{
+	#include "attributes.hpp"
+	#include "hw3_output.hpp"
+	#include "ir.hpp"
+	#include "bp.hpp"
+
+	#include <iostream>
+	extern int yylex();
+	extern int yylineno;
+	int yyerror(const char * message);
+%}
+
+%token VOID INT BYTE B BOOL TRUE FALSE RETURN COLON SC COMMA ID NUM STRING WHILE BREAK CONTINUE SWITCH CASE DEFAULT
+%left LBRACE RBRACE
+%nonassoc IF
+%nonassoc ELSE
+%right ASSIGN
+%left OR
+%left AND
+%left WEAK_RELOP
+%nonassoc STRONG_RELOP
+%left WEAK_BINOP
+%left STRONG_BINOP
+%right NOT
+%left RPAREN LPAREN
+
+%%
+
+Program	: {emitPrintGlobal();} Funcs
+	;
+
+Funcs : %empty {}
+    | FuncDecl Funcs {}
+	;
+
+FuncDecl : RetType ID LPAREN Formals RPAREN LBRACE {initFunctionAndUpdateStack($2.s, $1.type, $4.params_types, $4.params_names); openFunction($1, $2, $4);} Statements {closeFunction($1, $8);} RBRACE {closeScope(true);}
+	;
+
+RetType : Type {$$.type = $1.type;}
+    | VOID {$$.type = "VOID";}
+    ;
+
+Formals : %empty {$$.params_types = {}; $$.params_names = {};}
+    | FormalsList{$$.params_types = $1.params_types; $$.params_names = $1.params_names;}
+    ;
+
+FormalsList : FormalDecl{$$.params_types = {$1.type}; $$.params_names = {$1.s};}
+    | FormalDecl COMMA FormalsList {$$.params_types = {$1.type}; $$.params_names = {$1.s};
+                                    $$.params_types.insert($$.params_types.end(), $3.params_types.begin(), $3.params_types.end());
+                                    $$.params_names.insert($$.params_names.end(), $3.params_names.begin(), $3.params_names.end());}
+    ;
+
+FormalDecl : Type ID {$$.type = $1.type; $$.s = $2.s;}
+    ;
+
+Statements : Statement {updateNext($$, $1);}
+    | Statements M Statement {patchStatements($1, $2); updateNext($$, $3);}
+    ;
+
+Statement : LBRACE {initAndPushSymbolTableAndOffset();} Statements RBRACE {closeScope(); updateNext($$, $3);}
+    | Type ID SC {initVariableAndUpdateStack($2.s, $1.type); assignNewID($2, false); genN($$);}
+    | Type ID ASSIGN Exp SC {checkAssignByType($1.type, $4.type); initVariableAndUpdateStack($2.s, $1.type); assignNewID($2, true); storeID($2, $4); genN($$);}
+    | ID ASSIGN Exp SC {checkDec($1.s); checkAssignByName($1.s, $3.type); storeID($1, $3); genN($$);}
+    | Call SC {genN($$);}
+    | RETURN SC {checkReturnType("VOID"); retEmptyFunction();}
+    | RETURN Exp SC {checkReturnType($2.type, true); retFunction($2);}
+    | IF N LPAREN M OpenIf RPAREN M Statement CloseIf %prec IF {updateNext($$,$8); patchIf($$, $2, $4, $5, $7);}
+    | IF N LPAREN M OpenIf RPAREN M Statement CloseIf ELSE {initAndPushSymbolTableAndOffset();} M Statement {closeScope(); patchIfElse($$, $2, $4, $5, $7, $8, $12, $13);}
+    | WHILE N {initAndPushSymbolTableAndOffset(true);} LPAREN M {initWhileAndSwitchData($5.label);} Exp {checkBool($7.type);} RPAREN M Statement {patchIf($$, $2, $5, $7, $10); patchWhile($$, $5, $11); closeScope();}
+    | BREAK {checkBreak(); nextBreak();} SC {}
+    | CONTINUE {checkContinue(); nextContinue();} SC {}
+    | SWITCH N {initAndPushSymbolTableAndOffset(false,true);} LPAREN M {initWhileAndSwitchData();} Exp {checkNumeric($7.type);} N RPAREN LBRACE CaseList RBRACE {patchSwitch($$, $2, $5, $7, $9, $12); patchNextSwitch($$); closeScope();}
+    ;
+
+OpenIf : Exp {initAndPushSymbolTableAndOffset(); checkBool($1.type);};
+
+CloseIf : %empty {closeScope();};
+
+M : %empty {genM($$);};
+
+N : %empty {genN($$);};
+
+Call : ID LPAREN ExpList RPAREN {$$.type = funcCheck($1.s, $3.params_types); callFunction($$, $1, $3);}
+    | ID LPAREN RPAREN {$$.type = funcCheck($1.s); callFunction($$, $1, $3, true);}
+    ;
+
+ExpList : Exp {$$.params_types = {$1.type}; boolResult($1); $$.place_vec = {$1.place};}
+    | ExpList COMMA Exp {$$.params_types = {};
+                         $$.params_types.insert($$.params_types.end(), $1.params_types.begin(), $1.params_types.end());
+                         $$.params_types.push_back($3.type);
+                         boolResult($3);
+                         $$.place_vec = {};
+                         $$.place_vec.insert($$.place_vec.end(), $1.place_vec.begin(), $1.place_vec.end());
+                         $$.place_vec.push_back($3.place);}
+
+    ;
+
+Type : INT {$$.type = "INT";}
+    | BYTE {$$.type = "BYTE";}
+    | BOOL {$$.type = "BOOL";}
+    ;
+
+Exp : LPAREN Exp RPAREN {$$.type = $2.type; $$.place = $2.place; $$.true_list = $2.true_list; $$.false_list = $2.false_list;}
+    | Exp STRONG_BINOP Exp {checkNumeric($1.type); checkNumeric($3.type); $$.type = returnNumericType($1.type, $3.type); mul($$, $1, $2, $3);}
+    | Exp WEAK_BINOP Exp {checkNumeric($1.type); checkNumeric($3.type); $$.type = returnNumericType($1.type, $3.type); add($$, $1, $2, $3);}
+    | ID {$$.type = IdCheck($1.s); loadID($$, $1);}
+    | Call {$$.type = $1.type; $$.place = $1.place; funcAsBoolExp($$, $1);}
+    | NUM {$$.type = "INT"; loadNum($$, $1);}
+    | NUM B {checkByte($1.i); $$.type = "BYTE"; loadNum($$, $1);}
+    | STRING {$$.type = "STRING"; loadString($$, $1);}
+    | TRUE {$$.type = "BOOL"; assignBool($$, true);}
+    | FALSE {$$.type = "BOOL"; assignBool($$, false);}
+    | NOT Exp {checkBool($2.type); $$.type = "BOOL"; inverseBool($$, $2);}
+    | Exp AND M Exp {checkBool($1.type); checkBool($4.type); $$.type = "BOOL"; andBool($$, $1, $3, $4);}
+    | Exp OR M Exp {checkBool($1.type); checkBool($4.type); $$.type = "BOOL"; orBool($$, $1, $3, $4);}
+    | Exp STRONG_RELOP Exp {checkNumeric($1.type); checkNumeric($3.type); $$.type = "BOOL"; relComp($$, $1, $3, $2.s);}
+    | Exp WEAK_RELOP Exp {checkNumeric($1.type); checkNumeric($3.type); $$.type = "BOOL"; relComp($$, $1, $3, $2.s);}
+    ;
+
+CaseList : CaseDecl CaseList {pushCase($$, $1, $2);}
+    | CaseDecl {pushLastCase($$, $1);}
+    | DEFAULT COLON M Statements {$$.case_label_list.push($3.label); $$.switch_values.emplace_back(0,"default"); $$.next_list = $4.next_list;}
+    ;
+
+CaseDecl : CASE NUM COLON M Statements {$$.value = $2.i; $$.label = $4.label; $$.next_list = $5.next_list;}
+    ;
+%%
+
+int main(){
+    initGlobalScope();
+	yyparse();
+	endGlobalScope();
+	printBuffers();
+}
+
+int yyerror(const char * message){
+	output::errorSyn(yylineno);
+	exit(1);
+}
