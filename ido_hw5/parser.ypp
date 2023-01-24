@@ -1,0 +1,1091 @@
+%{
+	#include <iostream>
+	#include "hw3_output.hpp"
+	#include "Node.h"
+	#include "ScopeStacks.h"
+	#include "MemoryManager.hpp"
+	
+	using namespace std;
+	int yylex();
+	void yyerror(const char*);
+	extern int yylineno;
+
+	ScopeStacks scopeStacks;
+	CodeBuffer& buff = CodeBuffer::instance();
+	MemoryManager manager;
+	using std::string;
+	
+	bool IsLegalAssignment(EType type1, EType type2);
+	void Start();
+	void truncRes(Type* type);
+	string Phi(Type* expr);
+	
+%}
+%nonassoc VOID;
+%nonassoc INT;
+%nonassoc BYTE;
+%nonassoc B;
+%nonassoc BOOL;
+%nonassoc TRUE;
+%nonassoc FALSE;
+%nonassoc RETURN;
+%nonassoc WHILE;
+%nonassoc BREAK;
+%nonassoc CONTINUE;
+%nonassoc SC;
+%nonassoc COMMA;
+%nonassoc ID;
+%nonassoc NUM;
+%nonassoc STRING;
+%right ASSIGN;
+%right TERNARY;
+%right IF;
+%right ELSE;
+%left OR;
+%left AND;
+%left RELOP_EQ;
+%right RELOP_REL;
+%left BINOP_SUM;
+%left BINOP_MUL;
+%right NOT;
+%left LBRACE;
+%left RBRACE;
+%left LPAREN;
+%left RPAREN;
+%%
+
+Program : {Start();} Funcs {
+			if (yychar == YYEOF) {
+						
+						
+						Symbol sym;
+						
+						bool exists = scopeStacks.tablesStack.findId("main", sym);
+
+						if(!exists || !sym.argTypes.empty() || sym.retType != EVOID)
+						{
+							output::errorMainMissing();
+							exit(1);
+						}
+						scopeStacks.closeScope();
+						buff.printGlobalBuffer();
+						buff.printCodeBuffer();
+					}
+		}
+		;
+		
+Funcs : %empty {}
+		| FuncDecl Funcs {}
+		;
+		
+FuncDecl : RetType ID LPAREN Formals RPAREN
+			{
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$2)->name, sym);
+				if(exists)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->name);
+					exit(1);
+				}
+				
+				
+				std::vector<EType> typesList;
+				
+				std::vector<string> namesList; 
+				
+				((ArgumentList*)$4)->createLists(typesList, namesList);
+				
+				sym = Symbol(((Id*)$2)->name, typesList, namesList, ((Type*)$1)->type);
+				
+				scopeStacks.addSymbol(sym);
+				
+				string returnType = "i32";
+				if (((Type*)$1)->type == EVOID)
+				{
+					returnType = "void";
+				}
+				
+				string funcDefinition = "define " + returnType + "@" + ((Id*)$2)->name;
+				
+				int argsNum = ((ArgumentList*)$4)->arguments.size();
+				if (argsNum == 0) {
+				funcDefinition += "() {";
+				}
+				else {
+					funcDefinition += "(";
+					for (int i = 0; i < argsNum - 1; i++)
+					{
+						funcDefinition += "i32, ";
+					}
+					funcDefinition += "i32) {";
+				}
+				buff.emit(funcDefinition);
+
+				scopeStacks.openScope();
+				
+				string ar = manager.createActivationRecord();
+				buff.emit(ar + " = alloca [50 x i32]");
+
+				int offset = -1;
+				for(auto it = ((ArgumentList*)($4))->arguments.begin(); it!=((ArgumentList*)($4))->arguments.end(); it++)
+				{
+					Symbol tempSym;
+					Argument arg = *it;
+					// check if it defined before
+					bool exists = scopeStacks.tablesStack.findId(arg.name, tempSym);
+					if(exists)
+					{
+						output::errorDef(yylineno, arg.name);
+						exit(1);
+					}
+					
+					string toActualVar = "%" + to_string(-offset - 1);
+					sym = Symbol(arg.name, arg.type, offset, toActualVar);
+					
+					offset -= 1;
+					
+					scopeStacks.tablesStack.scopes.back().symTable.push_back(sym);
+				}
+			}
+			LBRACE Statements N M RBRACE 
+			{ 
+				scopeStacks.closeScope();
+				buff.bpatch(buff.merge(((Statement*)$8)->nextList, ((N*)$9)->nextList), ((M*)$10)->quad);
+				//fff
+				if (((Type*)$1)->type == EVOID)
+				{
+					buff.emit("ret void");
+				}
+				else
+				{
+					buff.emit("ret i32 0");
+				}
+				buff.emit("}");
+			}
+		;
+		
+RetType : Type {$$ = $1;}
+		| VOID {$$ = new Type(EVOID);}
+		;
+		
+Formals : %empty {$$ = new ArgumentList();}
+		| FormalsList {$$ = $1;}
+		;
+		
+FormalsList : FormalsDecl {
+					$$ = new ArgumentList();
+					((ArgumentList*)$$)->addArgument(*((Argument*)$1));
+					
+					delete $1;
+					}
+			| FormalsDecl COMMA FormalsList {					
+					((ArgumentList*)$3)->addArgument(*((Argument*)$1));
+					$$ = $3;
+					
+					delete $1;
+					}
+			;
+			
+FormalsDecl : Type ID {$$ = new Argument(((Type*)$1)->type, ((Id*)$2)->name);
+				delete $1;
+				
+				delete $2;
+				}
+			;
+			
+Statements : Statement 
+			{
+				$$ = $1;
+			}
+			| Statements N M Statement
+			{
+				buff.bpatch(((Statement*)$1)->nextList, ((M*)$3)->quad);
+				buff.bpatch(((N*)$2)->nextList,((M*)$3)->quad);
+				$$ = $4;
+			}
+			;
+			
+Statement : LBRACE OPEN_MARKER Statements RBRACE CLOSE_MARKER
+			{
+				$$ = $3;
+			}
+
+
+			| Type ID SC {				
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$2)->name, sym);
+
+				if(exists)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->name);
+					exit(1);
+				}
+				string reg = manager.createReg();
+
+				sym = Symbol(((Id*)$2)->name,((Type*)$1)->type, scopeStacks.offsetsStack.getOffset(), reg);
+				scopeStacks.addSymbol(sym);
+				string stringOffset = to_string(sym.offset);
+				string regEquals = "getelementptr [50 x i32], [50 x i32]* " + manager.getActivationRecord() + ", i32 0, i32 " + stringOffset;
+				buff.emit(reg + " = " + regEquals);
+				string storeOp = "store i32 0, i32* " + reg;
+				buff.emit(storeOp);
+				$$ = new Statement();
+				
+				delete $1;	
+				delete $2;
+				}
+			
+			
+			
+			| Type ID ASSIGN Exp SC {
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$2)->name, sym);
+				
+				if(exists)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->name);
+					exit(1);
+				}
+				
+				if(!IsLegalAssignment(((Type*)$1)->type, ((Type*)$4)->type)) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+
+				//hook
+				buff.bpatch( ((Type*)$4)->hookQuad,  ((Type*)$4)->hookLabel);
+
+
+
+
+				string reg = manager.createReg();
+				
+				sym = Symbol(((Id*)$2)->name,((Type*)$1)->type, scopeStacks.offsetsStack.getOffset(), reg);
+				scopeStacks.addSymbol(sym);
+				
+				string exprReg = (((Type*)$1)->type == EBOOL) ? Phi((Type*)$4) : ((Node*)$4)->reg;
+				
+				string stringOffset = to_string(sym.offset);
+				string currentAR = manager.getActivationRecord();
+				string regEquals = "getelementptr [50 x i32], [50 x i32]* " + currentAR + ", i32 0, i32 " + stringOffset;
+				buff.emit(reg + " = " + regEquals);
+				string storeOp = "store i32 " + exprReg + ", i32* " + reg;
+				buff.emit(storeOp);
+	
+				
+				
+				$$ = new Statement();
+				delete $1;
+				delete $2;
+				delete $4;
+				}
+			
+			
+			
+			| ID ASSIGN Exp SC {				
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$1)->name, sym);
+
+				if(!exists || sym.type==EFUNC)
+				{
+					
+					output::errorUndef(yylineno, ((Id*)$1)->name);
+					exit(1);
+				}
+
+				if(!IsLegalAssignment(sym.type, ((Type*)$3)->type)) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+				buff.bpatch( ((Type*)$3)->hookQuad, ((Type*)$3)->hookLabel);
+				
+
+
+				string exprReg = (sym.type == EBOOL) ? Phi((Type*)$3) : ((Node*)$3)->reg;
+				string storeOp = "store i32 " + exprReg + ", i32* " + sym.reg;
+				buff.emit(storeOp);
+
+				$$ = new Statement();
+				delete $1;
+				delete $3;
+				}
+			
+			
+			| Call SC 
+			{
+                buff.bpatch( ((Type*)$1)->hookQuad, ((Type*)$1)->hookLabel);
+				$$ = new Statement();
+				delete $1;
+			}
+			
+		
+			| RETURN SC {				
+				if(scopeStacks.tablesStack.lastFuncRetType()!= EVOID)
+					{
+						output::errorMismatch(yylineno);
+						exit(1);
+					}
+					buff.emit("ret void");
+					$$ = new Statement();
+				}
+			
+			
+			
+			| RETURN Exp SC {
+				if(scopeStacks.tablesStack.lastFuncRetType() == EVOID || !IsLegalAssignment(scopeStacks.tablesStack.lastFuncRetType(), ((Type*)$2)->type))
+				{
+					output::errorMismatch(yylineno);
+					
+					exit(1);
+				}
+				buff.bpatch( ((Type*)$2)->hookQuad,((Type*)$2)->hookLabel);
+				
+				
+				string exprReg = (((Type*)$2)->type == EBOOL) ? Phi((Type*)$2) : ((Node*)$2)->reg;
+				buff.emit("ret i32 " + exprReg);
+				
+				$$ = new Statement();
+				delete $2;
+				
+				}
+			
+			
+			
+			| IF LPAREN BoolExp RPAREN M OPEN_MARKER Statement CLOSE_MARKER %prec IF 
+			{
+				
+				buff.bpatch(((Type*)$3)->trueList,((M*)$5)->quad);
+				vector<jumpPair> nextList = buff.merge(((Type*)$3)->falseList, ((Statement*)$7)->nextList);
+				$$ = new Statement(nextList);
+				
+				delete $3;
+				delete $5;
+				delete $7;
+			}
+			
+			| IF LPAREN BoolExp RPAREN M OPEN_MARKER Statement CLOSE_MARKER ELSE N M OPEN_MARKER Statement CLOSE_MARKER 
+			{
+				buff.bpatch(((Type*)$3)->trueList,((M*)$5)->quad);
+				buff.bpatch(((Type*)$3)->falseList,((M*)$11)->quad);
+				
+				vector<jumpPair> almostNextList = buff.merge(((Statement*)$7)->nextList, ((N*)$10)->nextList);
+				$$ = new Statement(buff.merge(almostNextList, ((Statement*)$13)->nextList));
+			
+				delete $3;
+				delete $5;
+				delete $7;
+				delete $10;
+				delete $11;
+				delete $13;
+			}
+			
+			| WHILE N M LPAREN BoolExp RPAREN WHILE_OPEN_MARKER M Statement N CLOSE_MARKER 
+			{
+				buff.bpatch(((Type*)$5)->trueList,((M*)$8)->quad);
+				buff.bpatch(((N*)$10)->nextList,((M*)$3)->quad);
+				buff.bpatch(((N*)$2)->nextList, ((M*)$3)->quad);
+				vector<jumpPair> contList = buff.merge(((Statement*)$9)->nextList, scopeStacks.contsTopAndPop());
+				buff.bpatch(contList, ((M*)$3)->quad);
+				
+				$$ = new Statement(buff.merge(((Type*)$5)->falseList, scopeStacks.brksTopAndPop()));
+				
+				delete $2;
+				delete $3;
+				delete $5;
+				delete $8;
+				delete $9;
+
+			}
+			
+			| BREAK SC {
+				if(!scopeStacks.isWhileScope())
+				{
+					output::errorUnexpectedBreak(yylineno);
+					exit(1);
+				}
+				
+				int quad = buff.emit("br label @");
+				vector<jumpPair> brk = buff.makelist({quad, FIRST});
+				scopeStacks.brks.push(buff.merge(scopeStacks.brksTopAndPop(), brk));
+				$$ = new Statement();
+			}
+			| CONTINUE SC {			
+				if(!scopeStacks.isWhileScope())
+				{
+					output::errorUnexpectedContinue(yylineno);
+					exit(1);
+				}
+				
+				int quad = buff.emit("br label @");
+				vector<jumpPair> cont = buff.makelist({quad, FIRST});
+				scopeStacks.conts.push(buff.merge(scopeStacks.contsTopAndPop(), cont));
+				$$ = new Statement();
+			}
+			;
+			
+Call : ID LPAREN ExpList RPAREN {
+                //hook
+                vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @ ; call_param"), FIRST});
+                string hookLabel = buff.genLabel();
+
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$1)->name, sym);
+				if(!exists || sym.type != EFUNC)
+				{
+					output::errorUndefFunc(yylineno, ((Id*)$1)->name);
+					exit(1);
+				}
+
+				if (!sym.checkArgTypes(*((TypeList*)$3))){
+					vector<string> typeList = sym.typeStringList();
+					output::errorPrototypeMismatch(yylineno, sym.name, typeList);
+					exit(1);
+				}
+				
+				
+				list<pair<EType,string>>::iterator iter = ((TypeList*)$3)->typesAndRegs.begin();
+				string reg = manager.createReg();
+				if (((Id*)$1)->name != "print")
+				{
+					string returnType = sym.retType != EVOID ? "i32" : "void";
+					string call;
+					if(returnType != "void")
+					{
+						call += reg + " = ";
+					}
+					call += "call " + returnType + " @" + ((Id*)$1)->name + "(";
+					int argNum = (((TypeList*)$3)->typesAndRegs).size();
+					
+					for (int i = 0; i < argNum-1; i++, iter++)
+					{
+						call += "i32 " +  (*iter).second + ", ";
+					}
+					call += "i32 " +  (*iter).second + ")";
+					buff.emit(call);
+				}
+				else
+				{
+					buff.emit("call void @print(i8* " + (*iter).second + ")");
+				}
+				$$ = new Type(sym.retType);
+				((Type*)$$)->reg = reg;
+                ((Type*)$$)->hookQuad = hookQuad;
+                ((Type*)$$)->hookLabel = hookLabel;
+                buff.emit(";call_param "+((Type*)$$)->hookLabel);
+
+				delete $1;
+				delete $3;
+
+			}
+				
+	| ID LPAREN RPAREN {
+                //hook
+                vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @ ; call"), FIRST});
+                string hookLabel = buff.genLabel();
+
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$1)->name, sym);
+				if(!exists || sym.type != EFUNC)
+				{
+					output::errorUndefFunc(yylineno, ((Id*)$1)->name);
+					exit(1);
+				}
+
+				if (!sym.argTypes.empty()){
+					vector<string> typeList = sym.typeStringList();
+					output::errorPrototypeMismatch(yylineno, sym.name, typeList);
+					exit(1);
+				}
+
+				$$ = new Type(sym.retType);
+				
+				string retVal = sym.retType == EVOID ? "void" : "i32";
+				string assignIfNeeded = "";
+				if (sym.retType != EVOID) {
+					string reg = manager.createReg();
+					assignIfNeeded = reg + " = ";
+					((Type*)$$)->reg = reg;
+				}
+				buff.emit(assignIfNeeded + "call " + retVal + " @" + ((Id*)$1)->name + "()");
+				
+				((Type*)$$)->hookQuad = hookQuad;
+                ((Type*)$$)->hookLabel = hookLabel;
+
+				delete $1;
+				}
+	;
+	
+ExpList : Exp {
+			
+			buff.bpatch( ((Type*)$1)->hookQuad, ((Type*)$1)->hookLabel);
+			
+			$$ = new TypeList();
+			string exprReg = (((Type*)$1)->type == EBOOL) ? Phi(((Type*)$1)) : ((Type*)$1)->reg;
+			((TypeList*)$$)->addTypeAndReg(((Type*)$1)->type, exprReg);
+			delete $1;
+		}
+		| Exp
+		{
+			buff.bpatch( ((Type*)$1)->hookQuad, ((Type*)$1)->hookLabel);
+			
+			((Type*)$1)->reg = (((Type*)$1)->type == EBOOL) ? Phi(((Type*)$1)) : ((Node*)$1)->reg;
+		}
+			COMMA ExpList {			
+			((TypeList*)$4)->addTypeAndReg(((Type*)$1)->type, ((Type*)$1)->reg);
+			$$ = $4;
+			delete $1;
+			}
+		;
+		
+Type	: INT {$$ = new Type(EINT);}
+		| BYTE {$$ = new Type(EBYTE);}
+		| BOOL {$$ = new Type(EBOOL);}
+		;
+		
+	
+Exp : LPAREN N M Exp RPAREN {
+	$$ = $4;
+    if( ((Type*)$4)->isTernary) {
+        ((Type*)$$)->hookQuad = ((N*)$2)->nextList;
+        ((Type*)$$)->hookLabel = ((M*)$3)->quad;
+    } else {
+        buff.bpatch(((N*)$2)->nextList, ((M*)$3)->quad);
+    };
+    ((Type*)$$)->isTernary = false;
+    buff.emit("; Exp : LPAREN Exp RPAREN:    " + ((Type*)$$)->hookLabel + " " + ((Type*)$4)->hookLabel);
+    }
+//      1  2 3  4      5    6        7  8  9   10
+	| Exp IF N LPAREN  M BoolExp RPAREN M ELSE Exp %prec TERNARY {
+				if (((Type*)$1)->type == EBOOL && ((Type*)$10)->type == EBOOL) {
+					$$ = new Type(EBOOL,buff.merge(((Type*)$1)->trueList, ((Type*)$10)->trueList),buff.merge(((Type*)$1)->falseList, ((Type*)$10)->falseList));
+                    ((Type*)$$)->trueList = buff.merge(((Type*)$$)->trueList, ((N*)$3)->nextList);
+                }
+                else if (((Type*)$1)->type == ESTRING && ((Type*)$10)->type == ESTRING) {
+					$$ = new Type(ESTRING);
+				}
+				else if( !((Type*)$1)->isNum() || !((Type*)$10)->isNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}	 
+				else if (((Type*)$1)->type == EINT || ((Type*)$10)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				
+				//hook
+				// ((Type*)$$)->hookQuad = buff.makelist({buff.emit("br label @ ;2"), FIRST});
+				// ((Type*)$$)->hookLabel = buff.genLabel();
+				
+				// ((Type*)$$)->hookLabel = ((Type*)$10)->hookLabel;
+
+                int end;
+				if( ((Type*)$1)->isNum() || ((Type*)$1)->type == ESTRING) { // not a bool
+				    end = buff.emit("br label @ ;1");
+                }
+				
+				
+				buff.emit("; ((M*)$5)->quad : "+((M*)$5)->quad);
+				buff.emit("; ((Type*)$1)->hookLabel : "+((Type*)$1)->hookLabel);
+				buff.emit("; ((Type*)$10)->hookLabel : "+((Type*)$10)->hookLabel);
+				buff.bpatch(((Type*)$1)->hookQuad, ((M*)$5)->quad);
+				
+				buff.bpatch(((Type*)$6)->trueList, ((Type*)$1)->hookLabel);
+				buff.bpatch(((Type*)$6)->falseList,((M*)$8)->quad);
+                if (!(((Type*)$10)->isTernary)) {
+                    buff.emit("; !isTernary");
+                    buff.emit("; "+((Type*)$10)->hookLabel);
+				    buff.bpatch(((Type*)$10)->hookQuad,((Type*)$10)->hookLabel);
+                }
+
+				if( ((Type*)$1)->isNum() || ((Type*)$1)->type == ESTRING) { // not a bool
+                    string trueReg = ((Type*)$1)->reg;
+                    string falseReg = ((Type*)$10)->reg;
+                    string resultReg = manager.createReg();
+                    string trueLabel = buff.genLabel();
+                    int gotoendQuad = buff.emit("br label @ ;3");
+                    string falseLabel = buff.genLabel();
+                    int gotoendQuad2 = buff.emit("br label @ ;4");
+                    string endLabel = buff.genLabel();
+                    buff.bpatch( ((N*)$3)->nextList, trueLabel);
+                    buff.bpatch(buff.makelist({end, FIRST}), falseLabel);
+                    buff.bpatch(buff.makelist({gotoendQuad, FIRST}), endLabel);	
+                    buff.bpatch(buff.makelist({gotoendQuad2, FIRST}), endLabel);	
+
+                    if (((Type*)$1)->isNum()) {
+                        buff.emit(resultReg + " = phi i32 ["+trueReg+", %" + trueLabel + "], ["+falseReg+", %" + falseLabel + "]");
+                    }else if (((Type*)$1)->type == ESTRING) {
+                        buff.emit(resultReg + " = phi i8* ["+trueReg+", %" + trueLabel + "], ["+falseReg+", %" + falseLabel + "]");
+                    }
+
+                    ((Type*)$$)->reg = resultReg;
+				}
+
+                ((Type*)$$)->isTernary = true;
+
+				delete $1;
+				delete $10;
+			}
+	| Exp BINOP_MUL Exp {
+				if(!((Type*)$1)->isNum() || !((Type*)$3)->isNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				if (((Type*)$1)->type == EINT || ((Type*)$3)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				//hook
+				buff.bpatch( ((Type*)$3)->hookQuad, ((Type*)$3)->hookLabel);
+
+				((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+				((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+
+
+				string res = manager.createReg();
+				string oper =((Oper*)$2)->oper;
+				oper = (oper != "*") ? "udiv" : "mul";
+				if (oper == "udiv") {
+					if (((Type*)$$)->type == EINT) {
+						oper = "sdiv";
+					}
+					
+					string isZeroReg = manager.createReg();
+					buff.emit(isZeroReg + " = icmp eq i32 0, " + ((Type*)$3) -> reg);
+					int branch = buff.emit("br i1 "+ isZeroReg + ", label @, label @");
+					string itsZero = buff.genLabel();
+					buff.emit("call void @print(i8* getelementptr( [23 x i8], [23 x i8]* @.zeroDivException, i32 0, i32 0))");
+					buff.emit("call void @exit(i32 1)");
+					int zeroQuad = buff.emit("br label @");
+					string itsNotZero = buff.genLabel();
+					buff.bpatch(buff.merge(buff.makelist({branch, SECOND}), buff.makelist({zeroQuad, FIRST})) , itsNotZero);
+					buff.bpatch(buff.makelist({branch, FIRST}), itsZero);
+				}
+
+				string resEquals = " = " + oper + " i32 " + ((Type*)$1)->reg + ", " + ((Type*)$3)->reg;
+
+				buff.emit(res + resEquals);
+				((Type*)$$)->reg = res;
+
+				if(((Type*)$$)->type == EBYTE) truncRes(((Type*)$$));
+				
+
+				
+				delete $1;
+				delete $2;
+				delete $3;
+			}
+	
+	
+	| Exp BINOP_SUM Exp {
+				if(!((Type*)$1)->isNum() || !((Type*)$3)->isNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				if (((Type*)$1)->type == EINT || ((Type*)$3)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				//hook
+				buff.bpatch( ((Type*)$3)->hookQuad, ((Type*)$3)->hookLabel);
+
+				((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+				((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+
+				string res = manager.createReg();
+				string oper =((Oper*)$2)->oper;
+				oper = (oper != "-") ? "add" : "sub";
+				string resEquals = " = " + oper + " i32 " + ((Type*)$1)->reg + ", " + ((Type*)$3)->reg;
+			
+				buff.emit(res + resEquals);
+
+				$$->reg = res;
+				
+				if(((Type*)$$)->type == EBYTE) truncRes((Type*)$$);
+				
+				delete $1;
+				delete $3;
+				}
+	
+	
+	| ID {
+				Symbol sym;
+				// check if it defined before
+				bool exists = scopeStacks.tablesStack.findId(((Id*)$1)->name, sym);
+
+				if(!exists || sym.type == EFUNC)
+				{
+					output::errorUndef(yylineno, ((Id*)$1)->name);
+					exit(1);
+				}
+				//hook
+                vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @"), FIRST});
+                string hookLabel = buff.genLabel();
+
+				string reg = sym.reg;
+
+				if (sym.offset >= 0) {
+					reg = manager.createReg();
+					string loadOp = "load i32, i32* " + sym.reg;
+					buff.emit(reg + " = " + loadOp);
+				}
+				
+				$$ = new Type(sym.type);
+                $$->hookQuad = hookQuad;
+                $$->hookLabel = hookLabel;
+
+				if (sym.type == EBOOL) {
+					string cmpReg = manager.createReg();
+					string cmp = "icmp eq i32 " + reg + ", 1";
+					buff.emit(cmpReg + " = " + cmp);
+					int quad = buff.emit("br i1 " + cmpReg + ", label @, label @");
+					((Type*)$$)->falseList = buff.makelist({quad, SECOND});
+					((Type*)$$)->trueList = buff.makelist({quad, FIRST});
+
+				}
+
+				((Type*)$$)->reg = reg;
+				
+				delete $1;
+			}
+	
+	
+	| Call 
+	{
+		if (((Type*)$1)->type == EBOOL) {
+			string isTrueReg = manager.createReg();
+			string regEquals = "icmp eq i32 " + ((Type*)$1)->reg + ", 1";
+			buff.emit(isTrueReg + " = " + regEquals);
+			string branchString = "br i1 " + isTrueReg + ", label @, label @";
+			int quad = buff.emit(branchString);
+			((Type*)$1)->falseList = buff.makelist({quad, SECOND});
+			((Type*)$1)->trueList = buff.makelist({quad, FIRST});
+		}
+		$$ = $1;
+        ((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+        ((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+        buff.emit(";EXP:CALL "+((Type*)$$)->hookLabel);
+	}
+	
+	
+	| NUM 
+	{
+		
+		//hook
+		vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @"), FIRST});
+        string hookLabel = buff.genLabel();
+
+		$$ = new Type(EINT);
+        ((Type*)$$)->hookQuad = hookQuad;
+        ((Type*)$$)->hookLabel = hookLabel;
+		$$ -> reg = to_string(((Num*)$1)->value);
+	}
+	
+	
+	| NUM B {
+				if (((Num*)$1)->value > 255){
+		
+					output::errorByteTooLarge(yylineno, std::to_string(((Num*)$1)->value));
+					exit(1);
+				}
+				//hook
+				vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @"), FIRST});
+                string hookLabel = buff.genLabel();
+
+				$$ = new Type(EBYTE);
+                ((Type*)$$)->hookQuad = hookQuad;
+                ((Type*)$$)->hookLabel = hookLabel;
+				((Type*)$$)->reg = to_string(((Num*)$1)->value);
+			}
+	
+	
+	| STRING 
+	{	$$ = new Type(ESTRING);
+		
+		//hook
+		((Type*)$$)->hookQuad = buff.makelist({buff.emit("br label @ "), FIRST});
+		((Type*)$$)->hookLabel = buff.genLabel();
+		
+		string reg = manager.createReg();
+
+		string stringID = manager.createString();
+		string stringVal = (((String*)$1)->val);
+		stringVal.pop_back();
+
+		string stringLen = to_string(stringVal.size());
+
+		buff.emitGlobal(stringID + " = internal constant [" + stringLen + " x i8] c" + stringVal + "\\00\"");
+		buff.emit(reg + " = getelementptr [" + stringLen + " x i8], [" + stringLen + " x i8]* " + stringID + ", i8 0, i8 0");
+		((Type*)$$)->reg = reg;
+	}
+		
+	| TRUE 
+	{
+		//hook
+        vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @"), FIRST});
+        string hookLabel = buff.genLabel();
+		
+		int quad = buff.emit("br label @");
+		$$ = new Type(EBOOL, buff.makelist({quad,FIRST}), vector<jumpPair>());
+		((Type*)$$)->hookQuad = hookQuad;
+		((Type*)$$)->hookLabel = hookLabel;
+		((Type*)$$)->reg = "1";
+
+	}
+		
+	| FALSE 
+	{
+		//hook
+        vector<pair<int,BranchLabelIndex>> hookQuad = buff.makelist({buff.emit("br label @"), FIRST});
+        string hookLabel = buff.genLabel();
+
+		int quad = buff.emit("br label @");
+		$$ = new Type(EBOOL, vector<jumpPair>(), buff.makelist({quad, FIRST}));
+        ((Type*)$$)->hookQuad = hookQuad;
+		((Type*)$$)->hookLabel = hookLabel;
+		((Type*)$$)->reg = "0";
+	}
+	
+	
+	| NOT Exp {
+				if (((Type*)$2)->type != EBOOL) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+				$$ = new Type(EBOOL, ((Type*)$2)->falseList, ((Type*)$2)->trueList);
+                ((Type*)$$)->hookQuad = (( Type*)$2)->hookQuad;
+		        ((Type*)$$)->hookLabel = (( Type*)$2)->hookLabel;
+				delete $2;
+			}
+	
+	
+	| Exp AND M Exp {
+				if(((Type*)$1)->type != EBOOL || ((Type*)$4)->type != EBOOL)
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+				buff.bpatch( ((Type*)$4)->hookQuad, ((Type*)$4)->hookLabel);
+				
+				buff.bpatch(((Type*)$1)->trueList, (((M*)$3)->quad));
+				$$ = new Type(EBOOL, ((Type*)$4)->trueList, buff.merge(((Type*)$1)->falseList, ((Type*)$4)->falseList));
+                ((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+                ((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+
+				delete $1;
+				delete $3;
+				delete $4;
+			}
+	
+	
+	| Exp OR M Exp
+		{				
+			if(((Type*)$1)->type!=EBOOL || ((Type*)$4)->type!=EBOOL)
+			{
+				output::errorMismatch(yylineno);
+				exit(1);
+			}
+			//hook
+			buff.bpatch( ((Type*)$4)->hookQuad, ((Type*)$4)->hookLabel);
+
+			buff.bpatch(((Type*)$1)->falseList, (((M*)$3)->quad));
+			$$ = new Type(EBOOL, buff.merge(((Type*)$1)->trueList, ((Type*)$4)->trueList), ((Type*)$4)->falseList);
+            ((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+            ((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+
+			delete $1;
+			delete $3;
+			delete $4;
+		}
+	
+	
+	| Exp RELOP_EQ Exp 
+			{
+				if(!(((Type*)$1)->isNum()) || !(((Type*)$3)->isNum())) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+				buff.bpatch( ((Type*)$3)->hookQuad, ((Type*)$3)->hookLabel);
+
+				string oper = (((Oper*)$2)->oper != "==") ? "ne" : "eq";
+				string reg = manager.createReg();
+
+				buff.emit(reg + " = icmp "+ oper + " i32 " + ((Type*)$1)->reg + ", " + ((Type*)$3)->reg);
+				int quad = buff.emit("br i1 " + reg + ", label @, label @");
+
+				$$ = new Type(EBOOL, buff.makelist({quad,FIRST}), buff.makelist({quad,SECOND}));	
+                ((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+                ((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;	
+				((Type*)$$)->reg = reg;
+				delete $1;
+				delete $2;
+				delete $3;
+			}
+	
+	
+	| Exp RELOP_REL Exp {
+				if(!(((Type*)$1)->isNum()) || !(((Type*)$3)->isNum())) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+				buff.bpatch( ((Type*)$3)->hookQuad, ((Type*)$3)->hookLabel);
+
+				string reg = manager.createReg();
+				string oper = ((Oper*)$2)->oper;
+				string stringOper = "sgt";
+				if (oper == "<") stringOper = "slt";
+				else if (oper == "<=") stringOper = "sle";
+				else if (oper == ">=") stringOper = "sge";
+				buff.emit(reg + " = icmp " + stringOper + " i32 " + ((Type*)$1)->reg + ", " + ((Type*)$3)->reg);
+				int quad = buff.emit("br i1 " + reg + ", label @, label @");
+				$$ = new Type(EBOOL, buff.makelist({quad,FIRST}),buff.makelist({quad,SECOND}));
+                ((Type*)$$)->hookQuad = ((Type*)$1)->hookQuad;
+                ((Type*)$$)->hookLabel = ((Type*)$1)->hookLabel;
+				((Type*)$$)->reg = reg;
+
+				delete $1;
+				delete $2;
+				delete $3;}
+	
+	
+	| LPAREN Type RPAREN Exp 
+			{
+				if(!((Type*)$2)->isNum() || !((Type*)$4)->isNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				$$ = ((Type*)$4);
+                
+				//hook
+				((Type*)$$)->hookQuad = ((Type*)$4)->hookQuad;
+				((Type*)$$)->hookLabel = ((Type*)$4)->hookLabel;
+
+				((Type*)$$)->type = ((Type*)$2)->type;
+
+				if(((Type*)$$)->type == EBYTE) truncRes(((Type*)$$));
+				delete $2;
+			}
+	;
+// asserting expression is bool type
+BoolExp : Exp
+			{
+				// check expertion is boolean
+				if (((Type*)$1)->type != EBOOL) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				//hook
+			    buff.bpatch( ((Type*)$1)->hookQuad, ((Type*)$1)->hookLabel);
+				$$=$1;
+                // buff.emit("; BoolExp : Exp:    " + ((Type*)$$)->hookLabel + " " + ((Type*)$1)->hookLabel);
+			}
+			;	
+			
+			
+M : %empty
+		{
+			$$ = new M(buff.genLabel());
+		}
+			
+
+N : %empty
+		{
+			int quad = buff.emit("br label @");
+			string stringQuad= to_string(quad);
+			$$ = new N(stringQuad, buff.makelist({quad, FIRST}));
+		}
+
+			
+OPEN_MARKER : %empty {scopeStacks.openScope(scopeStacks.isWhileScope());}
+;
+
+WHILE_OPEN_MARKER : %empty 
+	{
+		scopeStacks.openScope(true);
+		vector<jumpPair> newCont = vector<jumpPair>();
+		vector<jumpPair> newBrk = vector<jumpPair>();
+		scopeStacks.conts.push(newCont);
+		scopeStacks.brks.push(newBrk);
+	}
+;
+
+CLOSE_MARKER : %empty {scopeStacks.closeScope();}
+
+%%
+
+int main()
+{
+	yyparse();
+}
+
+
+bool IsLegalAssignment(EType type1, EType type2){
+	return ((type1 == EINT && type2 == EBYTE) || (type1 == type2));
+}
+
+void yyerror(const char * message)
+{
+	output::errorSyn(yylineno);
+	exit(0);
+}
+
+
+void Start() {
+	buff.emitGlobal("declare i32 @printf(i8*, ...)");
+    buff.emitGlobal("declare void @exit(i32)");
+    buff.emitGlobal("@.int_specifier = constant [4 x i8] c\"%d\\0A\\00\"");
+    buff.emitGlobal("@.str_specifier = constant [4 x i8] c\"%s\\0A\\00\"");
+    buff.emitGlobal("define void @printi(i32) {");
+    buff.emitGlobal("call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @.int_specifier, i32 0, i32 0), i32 %0)");
+    buff.emitGlobal("ret void");
+    buff.emitGlobal("}");
+    buff.emitGlobal("define void @print(i8*) {");
+    buff.emitGlobal("call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @.str_specifier, i32 0, i32 0), i8* %0)");
+    buff.emitGlobal("ret void");
+    buff.emitGlobal("}");
+
+	buff.emitGlobal("@.zeroDivException = constant [23 x i8] c\"Error division by zero\\00\"");
+}
+
+void truncRes(Type* type){
+    string reg = manager.createReg();
+	string toEmit = reg + " = and i32 255, " + type->reg;
+    buff.emit(toEmit);
+    type->reg = reg;
+}
+
+string Phi(Type* expr) {
+	string trueLabel = buff.genLabel();
+	int trueQuad = buff.emit("br label @ ");
+	string falseLabel = buff.genLabel();
+	int falseQuad = buff.emit("br label @ ");
+	buff.bpatch(expr->falseList, falseLabel);
+	buff.bpatch(expr->trueList, trueLabel);
+	string lastLabel = buff.genLabel();
+	buff.bpatch(buff.makelist({falseQuad, FIRST}), lastLabel);
+	buff.bpatch(buff.makelist({trueQuad, FIRST}), lastLabel);
+	string reg = manager.createReg();
+	buff.emit(reg + " = phi i32 [1, %" + trueLabel + "], [0, %" + falseLabel + "]");
+
+	return reg;
+}
