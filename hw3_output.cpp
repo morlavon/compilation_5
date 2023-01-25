@@ -85,11 +85,3 @@ void output::errorMainMissing() {
 void output::errorByteTooLarge(int lineno, const string& value) {
     cout << "line " << lineno << ": byte value " << value << " out of range" << endl;
 }
-
-void output::errorConstDef(int lineno){
-    cout << "line " << lineno << ":" << " bad const def" << endl;
-}
-
-void output::errorConstMismatch(int lineno){
-    cout << "line " << lineno << ":" << " bad const use" << endl;
-}

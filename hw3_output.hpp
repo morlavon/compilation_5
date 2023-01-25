@@ -25,8 +25,7 @@ namespace output{
     void errorUnexpectedContinue(int lineno);
     void errorMainMissing();
     void errorByteTooLarge(int lineno, const string& value);
-    void errorConstDef(int lineno);
-    void errorConstMismatch(int lineno);
+
 }
 
 #endif

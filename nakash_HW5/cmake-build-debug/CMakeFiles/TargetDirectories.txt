@@ -1,3 +1,0 @@
-/mnt/f/degree/semester 5/Compi/HW/5/236360HW5/cmake-build-debug/CMakeFiles/rebuild_cache.dir
-/mnt/f/degree/semester 5/Compi/HW/5/236360HW5/cmake-build-debug/CMakeFiles/edit_cache.dir
-/mnt/f/degree/semester 5/Compi/HW/5/236360HW5/cmake-build-debug/CMakeFiles/236360HW5.dir
